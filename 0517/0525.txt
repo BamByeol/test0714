@@ -1,0 +1,376 @@
+[실습]
+                   --- web1 ---
+  users ---> LB    --- web2 --- --- NFS
+                   --- web3 ---
+       bridge    vmnet1       vmnet2
+    192.168.0.X  192.168.1.0  192.168.2.0
+
+ LB       vmnet0(bridge)-> DHCP=>static, vmnet1 : 192.168.1.100
+ web1     192.168.1.101  : DNS(8.8.8.8)
+          192.168.2.101  
+ web2     192.168.1.102  : DNS
+          192.168.2.102
+ web3     192.168.1.103
+          192.168.2.103
+
+ nfs      192.168.2.199 : 8.8.8.8
+
+
+[이름 변경하기]
+hostnamectl set-hostname lb
+su
+
+cd /etc/sysconfig/network-scripts
+ls ifcfg-ens*
+-> ifcfg-ens32 만 보인다
+vi ifcfg-ens32
+TYPE=Ethernet
+BOOTPROTO=none
+NAME=ens32
+DEVICE=ens32
+ONBOOT=yes
+IPADDR=192.168.0.2XX
+PREFIX=24
+GATEWAY=192.168.0.1
+DNS1=8.8.8.8
+
+
+cp ifcfg-ens32 ifcfg-ens34
+-> ifcfg-ens34
+vi ifcfg-ens34
+TYPE=Ethernet
+BOOTPROTO=none
+NAME=ens34
+DEVICE=ens34
+ONBOOT=yes
+IPADDR=192.168.1.100
+PREFIX=24
+
+저장후 빠져나와서..
+systemctl restart network  -> 만약 오류가 발생하면 99% 오타
+ip a 를 하면 변경된 IP 주소 정보를 확인할 수 있어야 한다.
+
+[web1]
+ifcfg-ens32
+TYPE=Ethernet
+BOOTPROTO=none
+NAME=ens32
+DEVICE=ens32
+ONBOOT=yes
+IPADDR=192.168.1.101
+PREFIX=24
+DNS1=8.8.8.8
+
+
+ifcfg-ens34
+TYPE=Ethernet
+BOOTPROTO=none
+NAME=ens34
+DEVICE=ens34
+ONBOOT=yes
+IPADDR=192.168.2.101
+PREFIX=24
+
+
+[web2]
+ifcfg-ens32
+TYPE=Ethernet
+BOOTPROTO=none
+NAME=ens32
+DEVICE=ens32
+ONBOOT=yes
+IPADDR=192.168.1.102
+PREFIX=24
+DNS1=8.8.8.8
+
+
+ifcfg-ens34
+TYPE=Ethernet
+BOOTPROTO=none
+NAME=ens34
+DEVICE=ens34
+ONBOOT=yes
+IPADDR=192.168.2.102
+PREFIX=24
+
+
+[web3]
+ifcfg-ens32
+TYPE=Ethernet
+BOOTPROTO=none
+NAME=ens32
+DEVICE=ens32
+ONBOOT=yes
+IPADDR=192.168.1.103
+PREFIX=24
+DNS1=8.8.8.8
+
+
+ifcfg-ens34
+TYPE=Ethernet
+BOOTPROTO=none
+NAME=ens34
+DEVICE=ens34
+ONBOOT=yes
+IPADDR=192.168.2.103
+PREFIX=24
+
+[nfs]
+ifcfg-ens32
+TYPE=Ethernet
+BOOTPROTO=none
+NAME=ens32
+DEVICE=ens32
+ONBOOT=yes
+IPADDR=192.168.2.199
+PREFIX=24
+
+모든 서버에서 IP 구성이 끝나면
+systemctl restart network  <-- 오류 없어야 함
+ip a <-- IP 확인
+
+
+step1. 인프라 구현(각 구간별 통신 여부)
+step2. nfs 서버 구축하기
+nfs 의 /web 디렉토리를 각 web 서버의 /var/www/html 와 마운트
+
+[root@nfs ~]# mkdir /web
+[root@nfs ~]# vi /etc/exports
+[root@nfs ~]# cat /etc/exports
+# 공개할디렉토리        #누구에게?(rw,sync,no_root_squash)
+/web                    192.168.2.0/24(rw,sync,no_root_squash)
+[root@nfs ~]# systemctl start nfs-server
+[root@nfs ~]# systemctl enable nfs-server
+[root@nfs ~]# # 상태확인
+[root@nfs ~]# systemctl status nfs-server | grep Active
+   Active: active (exited) since Thu 2023-05-25 12:35:59 KST; 43s ago
+[root@nfs ~]#
+
+
+web 서버는 /var/www/html 을 nfs 서버의 /web 과 연결하여 사용한다. 
+-> 나는 nfs 서버의 /web (from)을 끌어와서 /var/www/html(to) 에게 연결하겠다. 
+
+[root@web1 ~]# mount -t nfs 192.168.2.199:/web /var/www/html
+[root@web1 ~]# # 마운트 정보 확인하기
+[root@web1 ~]# mount | grep /web
+192.168.2.199:/web on /var/www/html type nfs4 (rw,relatime,vers=4.1,rsize=262144,wsize=262144,namlen=255,hard,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=192.168.2.101,local_lock=none,addr=192.168.2.199)
+[root@web1 ~]#
+
+[step3 ]  각 서버에 web 서비스 start, enable 을 ansible 을 이용하여 실행하기
+물론 직접 하나하나 해도 됩니다!!!
+
+- 관리를 위한 서버(nfs) 에서 키페어를 만들고 pub 키를 web 서버들에게 전달한다.
+결국 ansible 입장에서 web1~3 까지가 서버이고 nfs 가 클라이언트가 된다. 
+- ansible 은 결국 ssh 를 이용한다. 
+
+[root@nfs ~]# vi /web/index.html
+[root@nfs ~]# cat /web/index.html
+<center><h2>HELLO ALL</h2></center>
+[root@nfs ~]#
+
+[root@nfs ~]# # 키페어 만들기
+[root@nfs ~]# ssh-keygen -q -N "" -f mgmt.pem
+[root@nfs ~]# ls mgmt*
+mgmt.pem  mgmt.pem.pub
+[root@nfs ~]#
+[root@nfs ~]# cp mgmt.pem.pub /web
+[root@nfs ~]#
+
+[ 아래의 설정을 web1~3 까지 입력한다]
+[root@web1 ~]# # .ssh 만들고 공개키를 .ssh/authorized_keys 에 등록
+[root@web1 ~]# mkdir ~/.ssh ; chmod 700 .ssh ; cp /var/www/html/mgmt.pem.pub ~/.ssh/authorized_keys ; chmod 600 ~/.ssh/authorized_keys ; ls .ssh -l
+total 4
+-rw------- 1 root root 390 May 25 14:18 authorized_keys
+[root@web1 ~]#
+
+[root@web2 ~]# mkdir ~/.ssh ; chmod 700 .ssh ; cp /var/www/html/mgmt.pem.pub ~/.ssh/authorized_keys ; chmod 600 ~/.ssh/authorized_keys ; ls .ssh -l
+total 4
+-rw------- 1 root root 390 May 25 14:19 authorized_keys
+[root@web2 ~]#
+
+[root@web3 ~]# mkdir ~/.ssh ; chmod 700 .ssh ; cp /var/www/html/mgmt.pem.pub ~/.ssh/authorized_keys ; chmod 600 ~/.ssh/authorized_keys ; ls .ssh -l
+total 4
+-rw------- 1 root root 390 May 25 14:19 authorized_keys
+[root@web3 ~]#
+
+
+[root@nfs ~]# # web1~3 의 pub 키를 .ssh/known_hosts 에 등록하기 위해 ssh-keyscan 을 실행한다.
+[root@nfs ~]# ssh-keyscan 192.168.2.101 >> .ssh/known_hosts
+-bash: .ssh/known_hosts: No such file or directory
+[root@nfs ~]#
+[root@nfs ~]# mkdir ~/.ssh ; chmod 700 ~/.ssh
+[root@nfs ~]# ssh-keyscan 192.168.2.101 >> .ssh/known_hosts
+[root@nfs ~]# ssh-keyscan 192.168.2.102 >> .ssh/known_hosts
+[root@nfs ~]# ssh-keyscan 192.168.2.103 >> .ssh/known_hosts
+[root@nfs ~]# cat ~/.ssh/known_hosts
+ --- 생략 ---
+[root@nfs ~]#
+
+nfs 는 ssh(ansible) 입장에서 클라이언트로 동작한다. nfs 가 web 서버들에게 접속할 때
+기본적으로 root 로 접속하고 사용자 인증시 개인키는 mgmt.pem 파일을 이용할 수 있도록
+또한 접속시 사용할 목적지(웹서버) 포트가 22 이 되도록 config 파일을 만들어 주세요!!
+
+이게 정상적으로 작성되었다면 아래의 명령이 가능해야 합니다
+
+ssh 192.168.2.101 hostname
+web1
+
+----
+[root@nfs ~]# cat .ssh/config
+Host 192.168.2.*
+        User root
+        Port 22
+        IdentityFile ~/mgmt.pem
+[root@nfs ~]#
+[root@nfs ~]# ssh 192.168.2.101 hostname
+web1
+[root@nfs ~]#
+
+
+[step4. ansible 을 이용하여 서버 관리하기]
+vi /etc/ansible/hosts  # 관리서버들을 지역으로 그룹화 했음
+[seoul]
+192.168.2.101
+192.168.2.102
+
+[jeju]
+192.168.2.103
+
+ansible all -m service -a "name=httpd state=started enabled=yes"
+일괄적으로 모든 웹서버들이 start 되고 enable 된다.
+
+Quiz. 위의 명령을 응용하여 jeju 서버만 httpd 를 중지하라(enabled 는 필요없음)
+[root@nfs ~]# ansible jeju -m service -a "name=httpd state=stopped"
+
+[step5. 웹서버들을 외부에 공개하기]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Linux 에서 제공하는 오픈소스 기반의 로드밸런서 => HAProxy (하프록시)
+L4 로드 밸런서는 로드밸런서의 특정 포트를 확인하고 해당 포트에 기반하여 부하를 분산시킨다.
+
+즉, 외부에서 http://192.168.0.2XX 으로 웹접속을 시도하면 80 번 포트에 대해서 부하를 분산시킬 수 있다. 
+
+ mysql -u root -ptest123 -P 3306 db.test.pri
+
+
+[실습]
+yum -y install haproxy
+vi /etc/haproxy/haproxy.cfg
+
+------------------------ L4 로드 밸런서 --------------------------
+[root@lb ~]# cat /etc/haproxy/haproxy.cfg
+global  # HAProxy 시스템에 대한 설정값
+   log /dev/log local0
+   log /dev/log local1 notice
+   chroot /var/lib/haproxy  # HAProxy 를 root 가 실행하면 모든 실행은
+   stats timeout 30s
+   user haproxy    # HAProxy 동작시키는 기본 사용자 haproxy
+   group haproxy   # 그룹사용자 haproxy
+   daemon          # 데몬에
+
+defaults
+   log global  # 로그정보는 global 을 따른다
+   mode http              # tcp 를 사용하는 로드밸런싱 모드
+   option httplog        # 기본 로그는 SIP, DIP
+   option dontlognull    # 스캔등에 대한 정보는 로그화하지 않음
+   timeout connect 5s  # 실서버로의 최대 연결시간
+   timeout client 1m  # 외부 클라이언트의 요청이나 데이터와의 최대 연결시간
+   timeout server 1m  # 서버가 데이터를 승인하거나, 전송해야 할 때의 최대 시간
+
+frontend http_front
+   bind *:80
+   stats uri /haproxy?stats  #http://lb주소/haproxy?stats 에서 확인
+   default_backend http_back
+
+backend http_back
+   balance roundrobin
+   server server_name1 192.168.1.101:80 check
+   server server_name2 192.168.1.102:80 check
+   server server_name3 192.168.1.103:80 check
+[root@lb ~]#
+
+Quiz. 다음의 내용을 참고하여 http://192.168.0.2XX/blog 로 접속했을 경우
+별도의 페이지가 열리도록 해 보세요
+
+######## L7 로드 밸런서 ###############
+defaults
+   ...
+   mode http
+   ...
+
+frontend http_front
+   bind *:80
+   stats uri /haproxy?stats
+   acl url_blog path_beg /blog
+   use_backend blog_back if url_blog
+   default_backend http_back
+
+backend http_back
+   balance roundrobin
+   server server_name1 192.168.1.101:80 check
+   server server_name2 192.168.1.102:80 check
+
+backend blog_back
+   server server_name3 192.168.1.103:80 check
+
+
+[root@nfs ~]# mkdir /web/blog
+[root@nfs ~]# vi /web/blog/index.html
+[root@nfs ~]# cat /web/index.html
+<center><h2>MAIN PAGE</h2></center>
+[root@nfs ~]#
+[root@nfs ~]# cat /web/blog/index.html
+<center><h2>BLOG PAGE</h2></center>
+[root@nfs ~]#
+
+테스트는 http://192.168.0.2XX, http://192.168.0.2XX/blog
+
+
+리눅스에서는 어떻게 사용자별 작업 공간을 분리하는가? -> namespace(작업공간의 분리)
+user1, user2 자신의 홈 디렉토리에 파일을 업로드 했다. 제약이 없다면 특정 사용자 혼자서 /home 디렉토리의 대부분의 공간을 사용할 수 있다. -> cgroup (리소스 할당/작업공간별)
+
+리눅스 시스템이 시작되면 -> systemd (PID 1), 루트가 작업을 시작하면 초기에 systemd 로 프로세스를 초기화하고 systemd 아래에 부가적인 자식 프로세스를 시작시키게 된다. 
+
+별도의 작업공간에서 루트로 작업을 시작하도록 할 수 있다 -> chroot (루트로 동작하도록 해 준다)
+
+-> 이들이 모여서 docker 가 탄생했다. 
+
+
+
+[root@lb ~]# cat /etc/passwd | grep user1
+user1:x:1000:1000:user1:/home/user1:/bin/bash
+[root@lb ~]#
+
+user1 : 사용자의 ID
+X     : 패스워드 -> 실제로는 암호화되어 /etc/shadow 에 저장됨
+1000  : 사용자의 ID # 
+1000  : 사용자가 소속된 그룹의 ID #
+user1 : 사용자의 Full name 예) 홍길동  <-- 필수요소 아님
+/home/user1 : 사용자의 홈 디렉토리. 기본적으로 /home 아래에 생성
+/bin/bash : 사용자 user1 이 기본적으로 사용하는 쉘
+            ubuntu 의 경우에는 경량화된 bash 할 수 있는
+            /bin/dash 를 사용한다. 하지만 로그인시에는 
+            /bin/bash 를 사용한다. 
+
+Quiz. 내일까지... 한줄로 사용자생셩하면서 암호화된 패스워드 만들기 !!! 
+
+
+
